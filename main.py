@@ -14,7 +14,10 @@ import json
 app = FastAPI()
 
 # CORS
-origins = ["https://learnmoredigitalcourse.com"]
+origins = [
+    "https://learnmoredigitalcourse.com",
+    "https://yt2025hub.com",
+]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
