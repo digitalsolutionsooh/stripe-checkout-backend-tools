@@ -63,17 +63,13 @@ async def create_checkout_session(request: Request):
         return JSONResponse(status_code=400, content={"error": "price_id is required"})
 
     # escolhe a URL de sucesso de acordo com o produto
-    if price_id == 'price_1RpVq2EHsMKn9uoppjlZFH16':
-        success_url = 'https://learnmoredigitalcourse.com/pink-up1-stripe'
-    elif price_id in (
-        'price_1RpzFgEHsMKn9uop8tE1USBk',
-        'price_1RrsCbEHsMKn9uopRnYsH90a'
+    if price_id in (
+        'price_1RuLSnEHsMKn9uopKXdIKW4T',
+        'price_1RuLumEHsMKn9uopQYJvI5La'
     ):
-        success_url = 'https://learnmoredigitalcourse.com/lipovive-up1-stripe'
-    elif price_id == 'price_1Rs89iEHsMKn9uopwkT6I5ya':
-        success_url = 'https://learnmoredigitalcourse.com/lipomax-up1-stripe'
+        success_url = 'https://yt2025hub.com/tools-stripe/up1'
     else:
-        success_url = 'https://learnmoredigitalcourse.com/pink-up1-stripe'
+        success_url = 'https://yt2025hub.com/presell-stripe/grow2025/vsl'
 
     session = stripe.checkout.Session.create(
         payment_method_types=['card'],
@@ -234,120 +230,68 @@ async def stripe_webhook(request: Request):
                 }
             }]
         }
+        
+        resp = requests.post(
+            f"https://graph.facebook.com/v14.0/{PIXEL_ID}/events",
+            params={"access_token": ACCESS_TOKEN},
+            json=purchase_payload
+        )
+        print("→ Purchase event sent:", resp.status_code, resp.text)
 
-        # 3.3) Tenta criar a invoice e seus items
-        try:
-            print(f"🔔 [webhook] criando invoice para sessão {session.id}")
-
-            # 1) InvoiceItem para cada linha
-            for item in session.line_items.data:
-                ii = stripe.InvoiceItem.create(
-                    customer=cust,
-                    amount=item.amount_subtotal,
-                    currency=session.currency,
-                    description=f"{item.description} (Session {session.id})"
-                )
-                print(
-                    f"   → InvoiceItem criado: {ii.id}, "
-                    f"valor: {ii.amount/100:.2f} {ii.currency.upper()}"
-                )
-
-            # 2) Cria a Invoice em draft (não auto-advance)
-            invoice = stripe.Invoice.create(
-                customer=cust,
-                auto_advance=False,
-                collection_method="send_invoice",
-                days_until_due=0,
-                footer=(
-                    "Thank you for purchasing the formula. To access the material, "
-                    "simply click on the link and follow the instructions: "
-                    "https://burnjaroformula.online/members/\n\n"
-                    "If you have any questions, please send an email to: "
-                    "digital.solutions.ooh@gmail.com"
-                ),
-                metadata=dict(session.metadata or {})
-            )
-            print(
-                f"   → Invoice draft criada: {invoice.id}, "
-                f"subtotal: {invoice.subtotal/100:.2f} {invoice.currency.upper()}"
-            )
-
-            # 3) Finaliza a Invoice para agregar todos os InvoiceItems
-            finalized = stripe.Invoice.finalize_invoice(invoice.id)
-            print(
-                f"   → Invoice finalizada: {finalized.id}, "
-                f"valor devida: {finalized.amount_due/100:.2f} "
-                f"{finalized.currency.upper()}"
-            )
-
-        except Exception as e:
-            import traceback
-            print("‼️ Erro criando invoice:", e)
-            print(traceback.format_exc())
-
-        finally:
-            # 4) Mesmo se der erro acima, sempre envia o evento Purchase
-            resp = requests.post(
-                f"https://graph.facebook.com/v14.0/{PIXEL_ID}/events",
-                params={"access_token": ACCESS_TOKEN},
-                json=purchase_payload
-            )
-            print("→ Purchase event sent:", resp.status_code, resp.text)
-
-            # 4.1) Atualiza todo o order como "paid" — POST full payload
-            total = session.amount_total
-            fee   = total * Decimal("0.0399")        
-            net   = total - fee      
-            
-            utmify_order_paid = {
-              "orderId":       session.id,
-              "platform":      "Stripe",
-              "paymentMethod": "credit_card",
-              "status":        "paid",
-              "createdAt":     original_created_at,   # timestamp que você calculou lá em cima
-              "approvedDate":  time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
-              "refundedAt":    None,
-              "customer": {
-                "name":     session.customer_details.name  or "",
-                "email":    session.customer_details.email,
-                "phone":    session.customer_details.phone or None,
-                "document": None
-              },
-              "products": [
-                {
-                  "id":            li.price.id,
-                  "name":          li.description or li.price.id,
-                  "planId":        li.price.id,
-                  "planName":      li.price.nickname or None,
-                  "quantity":      li.quantity,
-                  "priceInCents":  li.amount_subtotal
-                }
-                for li in session.line_items.data
-              ],
-              "trackingParameters": {
-                "utm_source":     session.metadata.get("utm_source",""),
-                "utm_medium":     session.metadata.get("utm_medium",""),
-                "utm_campaign":   session.metadata.get("utm_campaign",""),
-                "utm_term":       session.metadata.get("utm_term",""),
-                "utm_content":    session.metadata.get("utm_content","")
-              },
-             "commission": {
-                "totalPriceInCents":     float(total),  
-                "gatewayFeeInCents":     float(fee),
-                "userCommissionInCents": float(net),
-                "currency":              session.currency.upper()
-             }
+        # 4.1) Atualiza todo o order como "paid" — POST full payload
+        total = session.amount_total
+        fee   = total * Decimal("0.0399")        
+        net   = total - fee      
+        
+        utmify_order_paid = {
+          "orderId":       session.id,
+          "platform":      "Stripe",
+          "paymentMethod": "credit_card",
+          "status":        "paid",
+          "createdAt":     original_created_at,   # timestamp que você calculou lá em cima
+          "approvedDate":  time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
+          "refundedAt":    None,
+          "customer": {
+            "name":     session.customer_details.name  or "",
+            "email":    session.customer_details.email,
+            "phone":    session.customer_details.phone or None,
+            "document": None
+          },
+          "products": [
+            {
+              "id":            li.price.id,
+              "name":          li.description or li.price.id,
+              "planId":        li.price.id,
+              "planName":      li.price.nickname or None,
+              "quantity":      li.quantity,
+              "priceInCents":  li.amount_subtotal
             }
-            
-            resp_utm = requests.post(
-              UTMIFY_API_URL,
-              headers={
-                "Content-Type": "application/json",
-                "x-api-token":  UTMIFY_API_KEY
-              },
-              json=utmify_order_paid
-            )
-            print("→ Pedido atualizado como pago na UTMify:", resp_utm.status_code, resp_utm.text)
+            for li in session.line_items.data
+          ],
+          "trackingParameters": {
+            "utm_source":     session.metadata.get("utm_source",""),
+            "utm_medium":     session.metadata.get("utm_medium",""),
+            "utm_campaign":   session.metadata.get("utm_campaign",""),
+            "utm_term":       session.metadata.get("utm_term",""),
+            "utm_content":    session.metadata.get("utm_content","")
+          },
+         "commission": {
+            "totalPriceInCents":     float(total),  
+            "gatewayFeeInCents":     float(fee),
+            "userCommissionInCents": float(net),
+            "currency":              session.currency.upper()
+         }
+        }
+        
+        resp_utm = requests.post(
+          UTMIFY_API_URL,
+          headers={
+            "Content-Type": "application/json",
+            "x-api-token":  UTMIFY_API_KEY
+          },
+          json=utmify_order_paid
+        )
+        print("→ Pedido atualizado como pago na UTMify:", resp_utm.status_code, resp_utm.text)
 
     # 5) Retorna 200 sempre
     return JSONResponse({"received": True})
