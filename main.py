@@ -2,6 +2,7 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from decimal import Decimal
+from fastapi import APIRouter
 import os
 import stripe
 import time
@@ -10,6 +11,11 @@ import requests
 import urllib.parse
 import hmac, base64
 import json
+import uuid
+
+def add_sid(url: str) -> str:
+    sep = '&' if '?' in url else '?'
+    return f"{url}{sep}sid={{CHECKOUT_SESSION_ID}}"
 
 app = FastAPI()
 
@@ -65,11 +71,12 @@ async def create_checkout_session(request: Request):
     # escolhe a URL de sucesso de acordo com o produto
     if price_id in (
         'price_1RuLSnEHsMKn9uopKXdIKW4T',
+        'price_1RxdG9EHsMKn9uopZQAj9Tjs',
         'price_1RuLumEHsMKn9uopQYJvI5La'
     ):
-        success_url = 'https://yt2025hub.com/tools-stripe/up1'
+        success_url = add_sid('https://yt2025hub.com/tools-stripe/up1')
     else:
-        success_url = 'https://yt2025hub.com/presell-stripe/grow2025/vsl'
+        success_url = add_sid('https://yt2025hub.com/presell-stripe/grow2025/vsl')
 
     session = stripe.checkout.Session.create(
         payment_method_types=['card'],
@@ -176,6 +183,69 @@ async def create_checkout_session(request: Request):
     # ──────────────────────────────────────────────────
 
     return {"checkout_url": session.url}
+
+@app.post("/upsell/intent")
+async def create_upsell_intent(request: Request):
+    stripe.api_key = STRIPE_SECRET_KEY
+    body = await request.json()
+    sid      = body.get("sid")
+    price_id = body.get("price_id")
+    quantity = int(body.get("quantity", 1))
+
+    if not sid or not price_id:
+        return JSONResponse(status_code=400, content={"error": "sid and price_id are required"})
+
+    # 1) Recupera a Session anterior e extrai customer + payment_method
+    sess = stripe.checkout.Session.retrieve(
+        sid,
+        expand=["payment_intent.payment_method", "customer"]
+    )
+    if not sess or not sess.customer:
+        return JSONResponse(status_code=400, content={"error": "Invalid session or missing customer"})
+
+    customer_id = sess.customer
+
+    # preferimos o PM da PI da Session
+    pm = getattr(getattr(sess, "payment_intent", None), "payment_method", None)
+    pm_id = pm.id if pm else None
+
+    # fallback: default do customer
+    if not pm_id and getattr(sess, "customer", None):
+        cust = sess.customer if isinstance(sess.customer, dict) else stripe.Customer.retrieve(customer_id)
+        pm_id = (cust.get("invoice_settings", {}) or {}).get("default_payment_method")
+
+    if not pm_id:
+        # Sem método salvo? devolve erro orientando a abrir um novo Checkout
+        return JSONResponse(status_code=409, content={"error": "No saved payment method; redirect to checkout"})
+
+    # 2) Carrega o price para pegar valor/moeda/identificação
+    price = stripe.Price.retrieve(price_id)
+    amount_minor = price["unit_amount"] * quantity
+    currency = price["currency"]
+
+    # 3) Metadados: copie UTMs da Session anterior e marque como upsell
+    base_meta = dict(sess.metadata or {})
+    base_meta.update({
+        "upsell": "true",
+        "parent_session": sid,
+        "price_id": price_id,
+        "quantity": str(quantity),
+    })
+
+    # 4) Idempotência p/ evitar dupla cobrança por duplo clique
+    idem_key = f"upsell:{sid}:{price_id}:{quantity}"
+
+    intent = stripe.PaymentIntent.create(
+        amount=amount_minor,
+        currency=currency,
+        customer=customer_id,
+        payment_method=pm_id,
+        confirmation_method="automatic",   # confirmaremos no front
+        metadata=base_meta,
+        idempotency_key=idem_key
+    )
+
+    return {"client_secret": intent.client_secret, "intent_id": intent.id}
 
 @app.post("/webhook")
 async def stripe_webhook(request: Request):
@@ -292,7 +362,127 @@ async def stripe_webhook(request: Request):
           json=utmify_order_paid
         )
         print("→ Pedido atualizado como pago na UTMify:", resp_utm.status_code, resp_utm.text)
+        
+    elif event["type"] == "payment_intent.succeeded":
+        # ↳ UPSSELL 1-CLICK (confirmado no front com confirmCardPayment)
+        intent_id = event["data"]["object"]["id"]
+        intent = stripe.PaymentIntent.retrieve(intent_id, expand=["latest_charge"])
 
+        # Só processa se marcamos como upsell no metadata
+        meta = dict(getattr(intent, "metadata", {}) or {})
+        if meta.get("upsell") != "true":
+            # não é upsell, ignorar
+            return JSONResponse({"received": True})
+
+        # ── Dados do cliente (name/email/phone) ──────────────────────────
+        email = name = phone = None
+
+        # 1) billing_details da primeira charge
+        ch = getattr(intent, "charges", None)
+        if ch and getattr(ch, "data", None):
+            c0 = ch.data[0]
+            bd = getattr(c0, "billing_details", None)
+            if bd:
+                email = getattr(bd, "email", None) or None
+                name  = getattr(bd, "name",  None) or None
+                phone = getattr(bd, "phone", None) or None
+
+        if (not email or not name or not phone) and getattr(intent, "latest_charge", None):
+            bd = getattr(intent.latest_charge, "billing_details", None)
+            if bd:
+                email = getattr(bd, "email", None) or email
+                name  = getattr(bd, "name",  None) or name
+                phone = getattr(bd, "phone", None) or phone
+
+        # 2) fallback: Customer
+        cust_id = getattr(intent, "customer", None)
+        if cust_id and (not email or not name or not phone):
+            cust = stripe.Customer.retrieve(cust_id)
+            email = email or (cust.get("email") or None)
+            name  = name  or (cust.get("name")  or None)
+            phone = phone or (cust.get("phone") or None)
+
+        # ── Cálculos (mesma regra do seu código) ────────────────────────
+        total = int(intent.amount)                         # em centavos
+        fee   = total * Decimal("0.0674")
+        net   = total - fee
+
+        # ── CAPI Purchase (email hash se disponível) ────────────────────
+        email_hash = hashlib.sha256(email.encode("utf-8")).hexdigest() if email else None
+        purchase_payload = {
+            "data": [{
+                "event_name": "Purchase",
+                "event_time": int(time.time()),
+                "event_id":   intent.id,
+                "action_source": "website",
+                "user_data": ({"em": email_hash} if email_hash else {}),
+                "custom_data": {
+                    "currency": intent.currency,
+                    "value":    total / 100.0,
+                    "content_ids":  [meta.get("price_id")] if meta.get("price_id") else [],
+                    "content_type": "product"
+                }
+            }]
+        }
+        try:
+            requests.post(
+                f"https://graph.facebook.com/v14.0/{PIXEL_ID}/events",
+                params={"access_token": ACCESS_TOKEN},
+                json=purchase_payload
+            )
+        except Exception as e:
+            print("→ CAPI (upsell) erro:", e)
+
+        # ── UTMify paid (mantendo campos e comissão como no principal) ──
+        utmify_order_paid = {
+          "orderId":       intent.id,
+          "platform":      "Stripe",
+          "paymentMethod": "credit_card",
+          "status":        "paid",
+          "createdAt":     time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(intent.created)),
+          "approvedDate":  time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
+          "refundedAt":    None,
+          "customer": {
+            "name":     name  or "",
+            "email":    email or "",
+            "phone":    phone or None,
+            "document": None
+          },
+          "products": [
+            {
+              "id":           meta.get("price_id"),
+              "name":         meta.get("price_id") or "Upsell",
+              "planId":       meta.get("price_id"),
+              "planName":     "Upsell",
+              "quantity":     int(meta.get("quantity","1") or "1"),
+              "priceInCents": total
+            }
+          ],
+          "trackingParameters": {
+            "utm_source":   meta.get("utm_source",""),
+            "utm_medium":   meta.get("utm_medium",""),
+            "utm_campaign": meta.get("utm_campaign",""),
+            "utm_term":     meta.get("utm_term",""),
+            "utm_content":  meta.get("utm_content","")
+          },
+          "commission": {
+            "totalPriceInCents":     float(total),
+            "gatewayFeeInCents":     float(fee),
+            "userCommissionInCents": float(net),
+            "currency":              intent.currency.upper()
+          }
+        }
+
+        try:
+            resp_utm = requests.post(
+              UTMIFY_API_URL,
+              headers={"Content-Type": "application/json","x-api-token": UTMIFY_API_KEY},
+              json=utmify_order_paid
+            )
+            print("→ Upsell pago enviado ao UTMify:", resp_utm.status_code, resp_utm.text)
+        except Exception as e:
+            print("→ UTMify (upsell) erro:", e)
+            
     # 5) Retorna 200 sempre
     return JSONResponse({"received": True})
 
