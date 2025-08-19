@@ -74,7 +74,7 @@ async def create_checkout_session(request: Request):
         'price_1RxdG9EHsMKn9uopZQAj9Tjs',
         'price_1RuLumEHsMKn9uopQYJvI5La'
     ):
-        success_url = add_sid('https://yt2025hub.com/tools-stripe/up1')
+        success_url = add_sid('https://learnmoredigitalcourse.com/teste-pink-down1-stripe')
     else:
         success_url = add_sid('https://yt2025hub.com/presell-stripe/grow2025/vsl')
 
